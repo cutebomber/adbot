@@ -42,10 +42,10 @@ logger = logging.getLogger(__name__)
 # ║  4. OWNER_ID   → message @userinfobot to get your user ID       ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
-BOT_TOKEN    = "YOUR_BOT_TOKEN_HERE"       # e.g. "7412638291:AAF..."
-API_ID       = 0                           # e.g. 12345678
-API_HASH     = "YOUR_API_HASH_HERE"        # e.g. "a1b2c3d4e5f6..."
-OWNER_ID     = 0                           # e.g. 123456789
+BOT_TOKEN    = "8634603705:AAH7v0fwn4C3vK_SRQnWOh3OnqTdyFHRukA"       # e.g. "7412638291:AAF..."
+API_ID       = 21752358                           # e.g. 12345678
+API_HASH     = "fb46a136fed4a4de27ab057c7027fec3"        # e.g. "a1b2c3d4e5f6..."
+OWNER_ID     = 1899208318                           # e.g. 123456789
 
 # ── Advanced (optional to change) ────────────────────────────────────────────
 MAX_ACCOUNTS  = 50
