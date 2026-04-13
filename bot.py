@@ -7,7 +7,6 @@ import asyncio
 import logging
 import sqlite3
 import os
-import json
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -34,14 +33,24 @@ logger = logging.getLogger(__name__)
     ACCOUNT_CUSTOM_MSG, ACCOUNT_CUSTOM_INTERVAL, AUTO_REPLY_MSG
 ) = range(11)
 
-# ── Config ───────────────────────────────────────────────────────────────────
-BOT_TOKEN   = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
-API_ID      = int(os.getenv("API_ID", "0"))        # From my.telegram.org
-API_HASH    = os.getenv("API_HASH", "YOUR_API_HASH")
-OWNER_ID    = int(os.getenv("OWNER_ID", "0"))      # Your Telegram user ID
-SESSION_DIR = "sessions"
-DB_PATH     = "data/adbot.db"
-MAX_ACCOUNTS = 50
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║                        CONFIGURATION                            ║
+# ╠══════════════════════════════════════════════════════════════════╣
+# ║  1. BOT_TOKEN  → @BotFather on Telegram → /newbot               ║
+# ║  2. API_ID     → https://my.telegram.org → API Development      ║
+# ║  3. API_HASH   → same page as API_ID                            ║
+# ║  4. OWNER_ID   → message @userinfobot to get your user ID       ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+BOT_TOKEN    = "YOUR_BOT_TOKEN_HERE"       # e.g. "7412638291:AAF..."
+API_ID       = 0                           # e.g. 12345678
+API_HASH     = "YOUR_API_HASH_HERE"        # e.g. "a1b2c3d4e5f6..."
+OWNER_ID     = 0                           # e.g. 123456789
+
+# ── Advanced (optional to change) ────────────────────────────────────────────
+MAX_ACCOUNTS  = 50
+SESSION_DIR   = "sessions"
+DB_PATH       = "data/adbot.db"
 
 # ── Database ─────────────────────────────────────────────────────────────────
 def init_db():
