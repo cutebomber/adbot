@@ -42,10 +42,10 @@ logger = logging.getLogger(__name__)
 # ║  4. OWNER_ID   → message @userinfobot to get your user ID       ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
-BOT_TOKEN    = "8634603705:AAH7v0fwn4C3vK_SRQnWOh3OnqTdyFHRukA"       # e.g. "7412638291:AAF..."
-API_ID       = 21752358                           # e.g. 12345678
-API_HASH     = "fb46a136fed4a4de27ab057c7027fec3"        # e.g. "a1b2c3d4e5f6..."
-OWNER_ID     = 1899208318                           # e.g. 123456789
+BOT_TOKEN    = "8634603705:AAH7v0fwn4C3vK_SRQnWOh3OnqTdyFHRukA"
+API_ID       = 21752358
+API_HASH     = "fb46a136fed4a4de27ab057c7027fec3"
+OWNER_ID     = 1899208318
 
 # ── Advanced (optional to change) ────────────────────────────────────────────
 MAX_ACCOUNTS  = 50
@@ -395,14 +395,22 @@ async def my_accounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def account_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    phone = update.callback_query.data.replace("accsettings_", "")
-    acc   = get_account(phone)
-    ctx.user_data["selected_acc"] = phone
-    msg   = acc[4] or "Using global"
-    iv    = acc[5] or "Using global"
-    ar    = acc[6] or "Not set"
-    text  = (
-        f"⚙️ <b>Settings: {acc[2]}</b>\n{phone}\n\n"
+    raw = update.callback_query.data
+    if raw.startswith("accsettings_"):
+        phone = raw.replace("accsettings_", "")
+        ctx.user_data["selected_acc"] = phone
+    else:
+        phone = ctx.user_data.get("selected_acc")
+    if not phone:
+        await send_or_edit(update, "❌ Session lost. Go back and select the account again.", kb_back_dashboard())
+        return DASHBOARD
+    acc = get_account(phone)
+    if not acc:
+        await send_or_edit(update, "❌ Account not found.", kb_back_dashboard())
+        return DASHBOARD
+    iv = acc[5] or "global"
+    text = (
+        f"⚙️ <b>Settings: {acc[2]}</b>\n<code>{phone}</code>\n\n"
         f"• Custom Message: <b>{'Set ✅' if acc[4] else 'Not Set'}</b>\n"
         f"• Interval: <b>{iv}s</b>\n"
         f"• Auto Reply: <b>{'Set ✅' if acc[6] else 'Not Set'}</b>\n"
@@ -419,13 +427,32 @@ async def account_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return SELECT_ACCOUNT_SETTINGS
 
 async def acc_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
     phone = update.callback_query.data.replace("acc_toggle_", "")
-    acc   = get_account(phone)
-    new   = 0 if acc[3] else 1
+    ctx.user_data["selected_acc"] = phone
+    acc = get_account(phone)
+    if not acc:
+        await update.callback_query.answer("❌ Account not found.", show_alert=True)
+        return SELECT_ACCOUNT_SETTINGS
+    new = 0 if acc[3] else 1
     update_account(phone, active=new)
-    await update.callback_query.answer(f"Account {'activated' if new else 'paused'}!", show_alert=True)
-    return await account_settings(update, ctx)
+    await update.callback_query.answer(f"Account {'activated ✅' if new else 'paused ⏸'}!", show_alert=True)
+    iv = acc[5] or "global"
+    text = (
+        f"⚙️ <b>Settings: {acc[2]}</b>\n<code>{phone}</code>\n\n"
+        f"• Custom Message: <b>{'Set ✅' if acc[4] else 'Not Set'}</b>\n"
+        f"• Interval: <b>{iv}s</b>\n"
+        f"• Auto Reply: <b>{'Set ✅' if acc[6] else 'Not Set'}</b>\n"
+        f"• Status: <b>{'Active ✅' if new else 'Paused ⏸'}</b>"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Custom Message", callback_data="acc_custmsg"),
+         InlineKeyboardButton("⏱ Custom Interval", callback_data="acc_custiv")],
+        [InlineKeyboardButton("🤖 Auto Reply",     callback_data="acc_autoreply"),
+         InlineKeyboardButton("⏸ Toggle Active",   callback_data=f"acc_toggle_{phone}")],
+        [InlineKeyboardButton("🔙 Back",           callback_data="my_accounts")],
+    ])
+    await send_or_edit(update, text, kb)
+    return SELECT_ACCOUNT_SETTINGS
 
 async def acc_custmsg_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -440,8 +467,12 @@ async def acc_custmsg_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg   = update.message.text.strip()
     if msg != "/skip":
         update_account(phone, ad_message=msg)
-        await update.message.reply_text("✅ Custom message set!", reply_markup=kb_back_dashboard())
-    return DASHBOARD
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Account Settings", callback_data="acc_back_settings")]])
+    await update.message.reply_text(
+        "✅ Custom message set!" if msg != "/skip" else "✅ Using global message.",
+        reply_markup=kb
+    )
+    return SELECT_ACCOUNT_SETTINGS
 
 async def acc_custiv_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -453,13 +484,14 @@ async def acc_custiv_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def acc_custiv_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     phone = ctx.user_data.get("selected_acc")
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Account Settings", callback_data="acc_back_settings")]])
     try:
         iv = int(update.message.text.strip())
         update_account(phone, interval=iv)
-        await update.message.reply_text(f"✅ Interval set to {iv}s", reply_markup=kb_back_dashboard())
+        await update.message.reply_text(f"✅ Interval set to {iv}s", reply_markup=kb)
     except ValueError:
-        await update.message.reply_text("❌ Invalid number.")
-    return DASHBOARD
+        await update.message.reply_text("❌ Invalid number. Send a number like 600", reply_markup=kb)
+    return SELECT_ACCOUNT_SETTINGS
 
 async def set_ad_message_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -593,14 +625,25 @@ async def auto_reply_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def auto_reply_set(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip()
-    # Apply to all accounts
-    for acc in get_accounts():
-        update_account(acc[1], auto_reply=None if msg == "/skip" else msg)
-    await update.message.reply_text(
-        "✅ Auto reply set for all accounts!" if msg != "/skip" else "✅ Auto reply disabled.",
-        reply_markup=kb_back_dashboard()
-    )
-    return DASHBOARD
+    phone = ctx.user_data.get("selected_acc")
+    if phone:
+        # Per-account auto reply
+        update_account(phone, auto_reply=None if msg == "/skip" else msg)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Account Settings", callback_data="acc_back_settings")]])
+        await update.message.reply_text(
+            "✅ Auto reply set for this account!" if msg != "/skip" else "✅ Auto reply disabled.",
+            reply_markup=kb
+        )
+        return SELECT_ACCOUNT_SETTINGS
+    else:
+        # Global auto reply
+        for acc in get_accounts():
+            update_account(acc[1], auto_reply=None if msg == "/skip" else msg)
+        await update.message.reply_text(
+            "✅ Auto reply set for all accounts!" if msg != "/skip" else "✅ Auto reply disabled.",
+            reply_markup=kb_back_dashboard()
+        )
+        return DASHBOARD
 
 async def howto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -687,16 +730,20 @@ def main():
                 CallbackQueryHandler(auto_reply_start,   pattern="^acc_autoreply$"),
                 CallbackQueryHandler(acc_toggle,         pattern="^acc_toggle_"),
                 CallbackQueryHandler(my_accounts,        pattern="^my_accounts$"),
+                CallbackQueryHandler(account_settings,   pattern="^acc_back_settings$"),
                 CallbackQueryHandler(dashboard,          pattern="^dashboard$"),
             ],
             ACCOUNT_CUSTOM_MSG: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, acc_custmsg_set),
+                CallbackQueryHandler(account_settings, pattern="^acc_back_settings$"),
             ],
             ACCOUNT_CUSTOM_INTERVAL: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, acc_custiv_set),
+                CallbackQueryHandler(account_settings, pattern="^acc_back_settings$"),
             ],
             AUTO_REPLY_MSG: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, auto_reply_set),
+                CallbackQueryHandler(account_settings, pattern="^acc_back_settings$"),
                 CallbackQueryHandler(dashboard, pattern="^dashboard$"),
             ],
         },
