@@ -159,46 +159,80 @@ async def get_client(phone) -> TelegramClient:
 broadcasting = False
 broadcast_task = None
 
+def is_group(entity):
+    """Return True if the entity is a group or supergroup (not a channel)."""
+    if isinstance(entity, Chat):
+        return True
+    if isinstance(entity, Channel) and entity.megagroup:
+        return True
+    return False
+
 async def broadcast_loop(app):
     global broadcasting
+    logger.info("Broadcast loop started")
     while broadcasting:
         accounts = get_accounts()
+        if not accounts:
+            logger.warning("No accounts in DB, waiting 30s")
+            await asyncio.sleep(30)
+            continue
+
         for acc in accounts:
             if not broadcasting:
                 break
             phone    = acc[1]
             active   = acc[3]
             msg      = acc[4] or get_setting("global_message")
-            interval = acc[5] or int(get_setting("global_interval") or 300)
-            if not active or not msg:
+            interval = int(acc[5] or get_setting("global_interval") or 300)
+
+            if not active:
+                logger.info(f"[{phone}] Skipped (inactive)")
                 continue
+            if not msg:
+                logger.info(f"[{phone}] Skipped (no message set)")
+                continue
+
             try:
                 client = await get_client(phone)
                 if not await client.is_user_authorized():
+                    logger.warning(f"[{phone}] Not authorized, skipping")
                     continue
+
                 dialogs = await client.get_dialogs()
-                groups = [d for d in dialogs if isinstance(d.entity, (Channel, Chat))
-                          and getattr(d.entity, 'megagroup', False) or isinstance(d.entity, Chat)]
+                groups  = [d for d in dialogs if is_group(d.entity)]
+                logger.info(f"[{phone}] Found {len(groups)} groups, sending...")
+
                 sent = 0
                 for dialog in groups:
+                    if not broadcasting:
+                        break
                     try:
                         await client.send_message(dialog.entity, msg)
                         sent += 1
                         log_event(phone, "sent", dialog.name)
-                        await asyncio.sleep(5)   # anti-flood per message
-                    except (FloodWaitError, UserBannedInChannelError,
-                            ChatWriteForbiddenError) as e:
+                        logger.info(f"[{phone}] Sent to {dialog.name}")
+                        await asyncio.sleep(5)   # anti-flood delay between each message
+                    except FloodWaitError as e:
+                        logger.warning(f"[{phone}] FloodWait {e.seconds}s")
+                        log_event(phone, "failed", f"FloodWait {e.seconds}s")
+                        await asyncio.sleep(e.seconds)
+                    except (UserBannedInChannelError, ChatWriteForbiddenError) as e:
                         log_event(phone, "failed", str(e))
-                        if isinstance(e, FloodWaitError):
-                            await asyncio.sleep(e.seconds)
                     except Exception as e:
+                        logger.error(f"[{phone}] Send error: {e}")
                         log_event(phone, "failed", str(e))
+
                 log_event(phone, "cycle_done", f"sent={sent}")
                 update_account(phone, last_run=datetime.now().isoformat())
+                logger.info(f"[{phone}] Cycle done. Sent={sent}. Sleeping {interval}s")
+                # Wait the interval before processing next account / next cycle
                 await asyncio.sleep(interval)
+
             except Exception as e:
-                logger.error(f"Broadcast error {phone}: {e}")
+                logger.error(f"[{phone}] Outer broadcast error: {e}")
                 await asyncio.sleep(30)
+
+    logger.info("Broadcast loop stopped")
 
 # ── Keyboards ─────────────────────────────────────────────────────────────────
 def kb_main():
@@ -553,14 +587,29 @@ async def start_ads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if broadcasting:
         await update.callback_query.answer("⚠️ Already running!", show_alert=True)
         return DASHBOARD
+    accs = get_accounts()
+    if not accs:
+        await update.callback_query.answer("❌ Add at least one account first!", show_alert=True)
+        return DASHBOARD
     msg = get_setting("global_message")
-    if not msg:
+    # Check if at least one account has a message (global or custom)
+    has_msg = bool(msg) or any(a[4] for a in accs)
+    if not has_msg:
         await update.callback_query.answer("❌ Set an ad message first!", show_alert=True)
         return DASHBOARD
     broadcasting = True
     set_setting("status", "running")
-    broadcast_task = asyncio.create_task(broadcast_loop(ctx.application))
-    await send_or_edit(update, "▶️ <b>Ads Started!</b>\n\nBroadcasting to all groups.", kb_back_dashboard())
+    loop = asyncio.get_event_loop()
+    broadcast_task = loop.create_task(broadcast_loop(ctx.application))
+    active_count = sum(1 for a in accs if a[3])
+    await send_or_edit(update,
+        f"▶️ <b>Ads Started!</b>\n\n"
+        f"• Active accounts: <b>{active_count}</b>\n"
+        f"• Interval: <b>{get_setting('global_interval') or 300}s</b>\n"
+        f"• Message: <b>Set ✅</b>\n\n"
+        "Broadcasting to all groups...",
+        kb_back_dashboard()
+    )
     return DASHBOARD
 
 async def stop_ads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
