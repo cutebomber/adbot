@@ -65,10 +65,12 @@ def init_db():
             name        TEXT,
             active      INTEGER DEFAULT 1,
             ad_message  TEXT,
-            interval    INTEGER DEFAULT 300,
-            auto_reply  TEXT,
-            added_at    TEXT,
-            last_run    TEXT
+            interval       INTEGER DEFAULT 300,
+            auto_reply     TEXT,
+            added_at       TEXT,
+            last_run       TEXT,
+            log_channel_id INTEGER DEFAULT NULL,
+            log_channel_url TEXT DEFAULT NULL
         );
         CREATE TABLE IF NOT EXISTS global_settings (
             key   TEXT PRIMARY KEY,
@@ -155,6 +157,58 @@ async def get_client(phone) -> TelegramClient:
         clients[phone] = c
     return clients[phone]
 
+# ── Log Channel Manager ──────────────────────────────────────────────────────
+async def ensure_log_channel(phone: str) -> tuple:
+    """Create a log channel for this account if it doesn't exist yet.
+    Returns (channel_id, invite_link) or (None, None) on failure."""
+    acc = get_account(phone)
+    if acc and acc[9]:   # log_channel_id column index 9
+        return acc[9], acc[10]
+    try:
+        from telethon.tl.functions.channels import CreateChannelRequest, ExportChatInviteRequest
+        from telethon.tl.functions.messages import ExportChatInviteRequest as MsgExportInvite
+        client = await get_client(phone)
+        result = await client(CreateChannelRequest(
+            title=f"📋 AdBot Logs | {phone}",
+            about="Auto-generated log channel for ad broadcast monitoring.",
+            megagroup=False,   # False = broadcast channel
+        ))
+        channel = result.chats[0]
+        cid     = channel.id
+        # Export invite link
+        inv = await client(ExportChatInviteRequest(channel))
+        url = inv.link
+        update_account(phone, log_channel_id=cid, log_channel_url=url)
+        logger.info(f"[{phone}] Log channel created: {url}")
+        return cid, url
+    except Exception as e:
+        logger.error(f"[{phone}] Failed to create log channel: {e}")
+        return None, None
+
+async def post_to_log_channel(phone: str, channel_id: int, group_name: str, msg_id: int, group_username: str = None):
+    """Post a sent-message log entry to the account's log channel."""
+    try:
+        client = await get_client(phone)
+        now    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if group_username:
+            link = f"https://t.me/{group_username}/{msg_id}"
+            text = (
+                f"📤 <b>Ad Sent</b>\n"
+                f"🕒 {now}\n"
+                f"💬 Group: <b>{group_name}</b>\n"
+                f"🔗 <a href='{link}'>View Message</a>"
+            )
+        else:
+            text = (
+                f"📤 <b>Ad Sent</b>\n"
+                f"🕒 {now}\n"
+                f"💬 Group: <b>{group_name}</b>\n"
+                f"<i>(Private group — no public link)</i>"
+            )
+        await client.send_message(channel_id, text, parse_mode='html')
+    except Exception as e:
+        logger.warning(f"[{phone}] Log channel post failed: {e}")
+
 # ── Ad Broadcast Engine ───────────────────────────────────────────────────────
 broadcasting = False          # global start/stop (dashboard)
 broadcast_task = None
@@ -238,6 +292,10 @@ async def broadcast_loop(app):
 async def broadcast_account_loop(phone: str):
     """Broadcast loop for a single account."""
     logger.info(f"[{phone}] Per-account broadcast started")
+
+    # Ensure log channel exists before starting
+    log_cid, log_url = await ensure_log_channel(phone)
+
     while phone in active_broadcasts:
         acc = get_account(phone)
         if not acc or not acc[3]:
@@ -262,14 +320,20 @@ async def broadcast_account_loop(phone: str):
                 if phone not in active_broadcasts:
                     break
                 try:
-                    await client.send_message(dialog.entity, msg)
+                    result = await client.send_message(dialog.entity, msg)
                     sent += 1
                     log_event(phone, "sent", dialog.name)
                     logger.info(f"[{phone}] Sent to {dialog.name}")
+                    # Post to log channel
+                    if log_cid:
+                        group_username = getattr(dialog.entity, 'username', None)
+                        await post_to_log_channel(phone, log_cid, dialog.name, result.id, group_username)
                     await asyncio.sleep(5)
                 except FloodWaitError as e:
                     logger.warning(f"[{phone}] FloodWait {e.seconds}s")
                     log_event(phone, "failed", f"FloodWait {e.seconds}s")
+                    if log_cid:
+                        await post_to_log_channel(phone, log_cid, dialog.name, 0, None)
                     await asyncio.sleep(e.seconds)
                 except (UserBannedInChannelError, ChatWriteForbiddenError) as e:
                     log_event(phone, "failed", str(e))
@@ -489,25 +553,30 @@ async def account_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not acc:
         await send_or_edit(update, "❌ Account not found.", kb_back_dashboard())
         return DASHBOARD
-    iv = acc[5] or "global"
+    iv      = acc[5] or "global"
+    log_url = acc[10] if len(acc) > 10 else None
+    log_line = f"\n• Log Channel: <a href='{log_url}'>📋 Open Logs</a>" if log_url else "\n• Log Channel: <i>Created on first Start Ads</i>"
     text = (
         f"⚙️ <b>Settings: {acc[2]}</b>\n<code>{phone}</code>\n\n"
         f"• Custom Message: <b>{'Set ✅' if acc[4] else 'Not Set'}</b>\n"
         f"• Interval: <b>{iv}s</b>\n"
         f"• Auto Reply: <b>{'Set ✅' if acc[6] else 'Not Set'}</b>\n"
         f"• Status: <b>{'Active ✅' if acc[3] else 'Paused ⏸'}</b>"
+        f"{log_line}"
     )
     is_running = phone in active_broadcasts
-    kb = InlineKeyboardMarkup([
+    kb_rows = [
         [InlineKeyboardButton("📝 Custom Message", callback_data="acc_custmsg"),
          InlineKeyboardButton("⏱ Custom Interval", callback_data="acc_custiv")],
         [InlineKeyboardButton("🤖 Auto Reply",     callback_data="acc_autoreply"),
          InlineKeyboardButton("⏸ Toggle Active",   callback_data=f"acc_toggle_{phone}")],
         [InlineKeyboardButton("⏹ Stop Ads" if is_running else "▶️ Start Ads",
                               callback_data=f"acc_stop_{phone}" if is_running else f"acc_start_{phone}")],
-        [InlineKeyboardButton("🔙 Back",           callback_data="my_accounts")],
-    ])
-    await send_or_edit(update, text, kb)
+    ]
+    if log_url:
+        kb_rows.append([InlineKeyboardButton("📋 Open Log Channel", url=log_url)])
+    kb_rows.append([InlineKeyboardButton("🔙 Back", callback_data="my_accounts")])
+    await send_or_edit(update, text, InlineKeyboardMarkup(kb_rows))
     return SELECT_ACCOUNT_SETTINGS
 
 async def acc_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -520,25 +589,30 @@ async def acc_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     new = 0 if acc[3] else 1
     update_account(phone, active=new)
     await update.callback_query.answer(f"Account {'activated ✅' if new else 'paused ⏸'}!", show_alert=True)
-    iv = acc[5] or "global"
+    iv      = acc[5] or "global"
+    log_url = acc[10] if len(acc) > 10 else None
+    log_line = f"\n• Log Channel: <a href='{log_url}'>📋 Open Logs</a>" if log_url else "\n• Log Channel: <i>Created on first Start Ads</i>"
     text = (
         f"⚙️ <b>Settings: {acc[2]}</b>\n<code>{phone}</code>\n\n"
         f"• Custom Message: <b>{'Set ✅' if acc[4] else 'Not Set'}</b>\n"
         f"• Interval: <b>{iv}s</b>\n"
         f"• Auto Reply: <b>{'Set ✅' if acc[6] else 'Not Set'}</b>\n"
         f"• Status: <b>{'Active ✅' if new else 'Paused ⏸'}</b>"
+        f"{log_line}"
     )
     is_running = phone in active_broadcasts
-    kb = InlineKeyboardMarkup([
+    kb_rows = [
         [InlineKeyboardButton("📝 Custom Message", callback_data="acc_custmsg"),
          InlineKeyboardButton("⏱ Custom Interval", callback_data="acc_custiv")],
         [InlineKeyboardButton("🤖 Auto Reply",     callback_data="acc_autoreply"),
          InlineKeyboardButton("⏸ Toggle Active",   callback_data=f"acc_toggle_{phone}")],
         [InlineKeyboardButton("⏹ Stop Ads" if is_running else "▶️ Start Ads",
                               callback_data=f"acc_stop_{phone}" if is_running else f"acc_start_{phone}")],
-        [InlineKeyboardButton("🔙 Back",           callback_data="my_accounts")],
-    ])
-    await send_or_edit(update, text, kb)
+    ]
+    if log_url:
+        kb_rows.append([InlineKeyboardButton("📋 Open Log Channel", url=log_url)])
+    kb_rows.append([InlineKeyboardButton("🔙 Back", callback_data="my_accounts")])
+    await send_or_edit(update, text, InlineKeyboardMarkup(kb_rows))
     return SELECT_ACCOUNT_SETTINGS
 
 async def acc_start_ads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
