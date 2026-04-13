@@ -249,14 +249,11 @@ def kb_dashboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add Account",   callback_data="add_account"),
          InlineKeyboardButton("📋 My Accounts",   callback_data="my_accounts")],
-        [InlineKeyboardButton("📝 Set Ad Message",callback_data="set_ad_message"),
-         InlineKeyboardButton("⏱ Set Time Interval", callback_data="set_interval")],
         [InlineKeyboardButton("▶️ Start Ads",     callback_data="start_ads"),
          InlineKeyboardButton("⏸ Stop Ads",       callback_data="stop_ads")],
         [InlineKeyboardButton("🗑 Delete Account", callback_data="delete_accounts"),
          InlineKeyboardButton("📈 Analytics",      callback_data="analytics")],
-        [InlineKeyboardButton("🤖 Auto Reply",     callback_data="auto_reply"),
-         InlineKeyboardButton("🔙 Back",           callback_data="back_main")],
+        [InlineKeyboardButton("🔙 Back",           callback_data="back_main")],
     ])
 
 def kb_interval():
@@ -316,8 +313,6 @@ async def dashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
         f"📊 <b>Ads DASHBOARD</b>\n\n"
         f"• Hosted Accounts: <b>{len(accs)}/{MAX_ACCOUNTS}</b>\n"
-        f"• Ad Message: <b>{'Set ✅' if msg else 'Not Set ❌'}</b>\n"
-        f"• Cycle Interval: <b>{iv}s</b>\n"
         f"• Advertising Status: <b>{stat_icon}</b>\n\n"
         "Choose an action below to continue:"
     )
