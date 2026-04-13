@@ -156,8 +156,9 @@ async def get_client(phone) -> TelegramClient:
     return clients[phone]
 
 # ── Ad Broadcast Engine ───────────────────────────────────────────────────────
-broadcasting = False
+broadcasting = False          # global start/stop (dashboard)
 broadcast_task = None
+active_broadcasts: dict = {}  # phone -> asyncio.Task (per-account)
 
 def is_group(entity):
     """Return True if the entity is a group or supergroup (not a channel)."""
@@ -233,6 +234,57 @@ async def broadcast_loop(app):
                 await asyncio.sleep(30)
 
     logger.info("Broadcast loop stopped")
+
+async def broadcast_account_loop(phone: str):
+    """Broadcast loop for a single account."""
+    logger.info(f"[{phone}] Per-account broadcast started")
+    while phone in active_broadcasts:
+        acc = get_account(phone)
+        if not acc or not acc[3]:
+            logger.info(f"[{phone}] Account inactive or deleted, stopping")
+            break
+        msg      = acc[4] or get_setting("global_message")
+        interval = int(acc[5] or get_setting("global_interval") or 300)
+        if not msg:
+            logger.warning(f"[{phone}] No message set, waiting 30s")
+            await asyncio.sleep(30)
+            continue
+        try:
+            client = await get_client(phone)
+            if not await client.is_user_authorized():
+                logger.warning(f"[{phone}] Not authorized")
+                break
+            dialogs = await client.get_dialogs()
+            groups  = [d for d in dialogs if is_group(d.entity)]
+            logger.info(f"[{phone}] Found {len(groups)} groups")
+            sent = 0
+            for dialog in groups:
+                if phone not in active_broadcasts:
+                    break
+                try:
+                    await client.send_message(dialog.entity, msg)
+                    sent += 1
+                    log_event(phone, "sent", dialog.name)
+                    logger.info(f"[{phone}] Sent to {dialog.name}")
+                    await asyncio.sleep(5)
+                except FloodWaitError as e:
+                    logger.warning(f"[{phone}] FloodWait {e.seconds}s")
+                    log_event(phone, "failed", f"FloodWait {e.seconds}s")
+                    await asyncio.sleep(e.seconds)
+                except (UserBannedInChannelError, ChatWriteForbiddenError) as e:
+                    log_event(phone, "failed", str(e))
+                except Exception as e:
+                    logger.error(f"[{phone}] Send error: {e}")
+                    log_event(phone, "failed", str(e))
+            log_event(phone, "cycle_done", f"sent={sent}")
+            update_account(phone, last_run=datetime.now().isoformat())
+            logger.info(f"[{phone}] Cycle done. Sent={sent}. Sleeping {interval}s")
+            await asyncio.sleep(interval)
+        except Exception as e:
+            logger.error(f"[{phone}] Outer error: {e}")
+            await asyncio.sleep(30)
+    active_broadcasts.pop(phone, None)
+    logger.info(f"[{phone}] Per-account broadcast stopped")
 
 # ── Keyboards ─────────────────────────────────────────────────────────────────
 def kb_main():
@@ -445,11 +497,14 @@ async def account_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"• Auto Reply: <b>{'Set ✅' if acc[6] else 'Not Set'}</b>\n"
         f"• Status: <b>{'Active ✅' if acc[3] else 'Paused ⏸'}</b>"
     )
+    is_running = phone in active_broadcasts
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 Custom Message", callback_data="acc_custmsg"),
          InlineKeyboardButton("⏱ Custom Interval", callback_data="acc_custiv")],
         [InlineKeyboardButton("🤖 Auto Reply",     callback_data="acc_autoreply"),
          InlineKeyboardButton("⏸ Toggle Active",   callback_data=f"acc_toggle_{phone}")],
+        [InlineKeyboardButton("⏹ Stop Ads" if is_running else "▶️ Start Ads",
+                              callback_data=f"acc_stop_{phone}" if is_running else f"acc_start_{phone}")],
         [InlineKeyboardButton("🔙 Back",           callback_data="my_accounts")],
     ])
     await send_or_edit(update, text, kb)
@@ -473,15 +528,51 @@ async def acc_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"• Auto Reply: <b>{'Set ✅' if acc[6] else 'Not Set'}</b>\n"
         f"• Status: <b>{'Active ✅' if new else 'Paused ⏸'}</b>"
     )
+    is_running = phone in active_broadcasts
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 Custom Message", callback_data="acc_custmsg"),
          InlineKeyboardButton("⏱ Custom Interval", callback_data="acc_custiv")],
         [InlineKeyboardButton("🤖 Auto Reply",     callback_data="acc_autoreply"),
          InlineKeyboardButton("⏸ Toggle Active",   callback_data=f"acc_toggle_{phone}")],
+        [InlineKeyboardButton("⏹ Stop Ads" if is_running else "▶️ Start Ads",
+                              callback_data=f"acc_stop_{phone}" if is_running else f"acc_start_{phone}")],
         [InlineKeyboardButton("🔙 Back",           callback_data="my_accounts")],
     ])
     await send_or_edit(update, text, kb)
     return SELECT_ACCOUNT_SETTINGS
+
+async def acc_start_ads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Start ads for a single account."""
+    phone = update.callback_query.data.replace("acc_start_", "")
+    ctx.user_data["selected_acc"] = phone
+    acc = get_account(phone)
+    if not acc:
+        await update.callback_query.answer("❌ Account not found.", show_alert=True)
+        return SELECT_ACCOUNT_SETTINGS
+    msg = acc[4] or get_setting("global_message")
+    if not msg:
+        await update.callback_query.answer("❌ Set a message for this account first!", show_alert=True)
+        return SELECT_ACCOUNT_SETTINGS
+    if phone in active_broadcasts:
+        await update.callback_query.answer("⚠️ Already running!", show_alert=True)
+        return SELECT_ACCOUNT_SETTINGS
+    loop = asyncio.get_event_loop()
+    active_broadcasts[phone] = loop.create_task(broadcast_account_loop(phone))
+    await update.callback_query.answer(f"▶️ Ads started for {phone}!", show_alert=True)
+    # Refresh the settings page to show Stop button
+    return await account_settings(update, ctx)
+
+async def acc_stop_ads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Stop ads for a single account."""
+    phone = update.callback_query.data.replace("acc_stop_", "")
+    ctx.user_data["selected_acc"] = phone
+    if phone in active_broadcasts:
+        active_broadcasts[phone].cancel()
+        active_broadcasts.pop(phone, None)
+        await update.callback_query.answer(f"⏹ Ads stopped for {phone}!", show_alert=True)
+    else:
+        await update.callback_query.answer("Already stopped.", show_alert=True)
+    return await account_settings(update, ctx)
 
 async def acc_custmsg_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -773,6 +864,8 @@ def main():
                 CallbackQueryHandler(acc_custiv_start,   pattern="^acc_custiv$"),
                 CallbackQueryHandler(auto_reply_start,   pattern="^acc_autoreply$"),
                 CallbackQueryHandler(acc_toggle,         pattern="^acc_toggle_"),
+                CallbackQueryHandler(acc_start_ads,      pattern="^acc_start_"),
+                CallbackQueryHandler(acc_stop_ads,       pattern="^acc_stop_"),
                 CallbackQueryHandler(my_accounts,        pattern="^my_accounts$"),
                 CallbackQueryHandler(account_settings,   pattern="^acc_back_settings$"),
                 CallbackQueryHandler(dashboard,          pattern="^dashboard$"),
